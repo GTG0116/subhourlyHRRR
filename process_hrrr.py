@@ -98,20 +98,31 @@ def process_grib(file_path, force_save=False):
             continue
 
         print(f"    + Saving frame for {valid_time} (Max P-Type: {max_val})")
-        fig = plt.figure(figsize=(10, 6), frameon=False)
-        ax = plt.axes(projection=ccrs.Mercator())
-        ax.set_extent([-125, -66.5, 24, 49.5], crs=ccrs.PlateCarree())
-        
-        cmap = mcolors.ListedColormap(['#00ff00', '#ff00ff', '#ffa500', '#00ffff'])
-        norm = mcolors.BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5], cmap.N)
-        
-        ax.pcolormesh(lons, lats, np.ma.masked_where(ptype == 0, ptype), 
-                      transform=ccrs.PlateCarree(), cmap=cmap, norm=norm, shading='nearest')
-        ax.axis('off')
-        
-        out_filename = f"ptype_{valid_time.strftime('%Y%m%d_%H%M')}.png"
-        plt.savefig(os.path.join(OUTPUT_DIR, out_filename), bbox_inches='tight', pad_inches=0, transparent=True, dpi=90)
-        plt.close()
+        # --- Improved Plotting Logic ---
+# Force a specific aspect ratio based on our bounds (roughly 10:6 for CONUS)
+fig = plt.figure(figsize=(15, 9), frameon=False) 
+
+# Use add_axes to fill the ENTIRE figure area (no margins/padding)
+ax = fig.add_axes([0, 0, 1, 1], projection=ccrs.Mercator(), frameon=False)
+ax.set_extent([-125, -66.5, 24, 49.5], crs=ccrs.PlateCarree())
+
+# Colormap
+cmap = mcolors.ListedColormap(['#32cd32', '#ff69b4', '#ffa500', '#00ffff']) # High-vis colors
+norm = mcolors.BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5], cmap.N)
+
+# Plot data
+# We use 'nearest' to keep pixels sharp, or 'bilinear' to make it look smooth
+ax.pcolormesh(lons, lats, np.ma.masked_where(ptype == 0, ptype), 
+              transform=ccrs.PlateCarree(), cmap=cmap, norm=norm, 
+              shading='auto', antialiased=True)
+
+ax.axis('off')
+
+# CRITICAL: Do NOT use bbox_inches='tight'. 
+# This ensures the geographic bounds of the PNG are identical every time.
+out_path = os.path.join(OUTPUT_DIR, out_filename)
+plt.savefig(out_path, transparent=True, dpi=150) # Higher DPI for crispness
+plt.close()
 
         generated_frames.append({
             "file": f"data/{out_filename}",
