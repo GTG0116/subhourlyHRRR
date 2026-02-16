@@ -141,7 +141,7 @@ def process_grib(file_path, force_save=False):
         out_name = f"ptype_{valid_time.strftime('%Y%m%d_%H%M')}.png"
         out_path = os.path.join(OUTPUT_DIR, out_name)
         
-        plt.savefig(out_path, transparent=True, dpi=300, bbox_inches='tight', pad_inches=0)
+        plt.savefig(out_path, transparent=True, dpi=700, bbox_inches='tight', pad_inches=0)
         plt.close(fig)
 
         generated_frames.append({
