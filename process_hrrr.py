@@ -10,6 +10,12 @@ from datetime import datetime, timedelta, timezone
 from botocore import UNSIGNED
 from botocore.config import Config
 import matplotlib.colors as mcolors
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import functools
+
+# Must be before any matplotlib imports
+import matplotlib
+matplotlib.use('Agg')
 
 # --- Configuration ---
 BUCKET_NAME = 'noaa-hrrr-bdp-pds'
@@ -19,7 +25,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
-# S3 client
+# S3 client (unsigned for public bucket)
 s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
 
 # CONUS bounds [West, East, South, North]
@@ -103,13 +109,13 @@ def process_grib(file_path, force_save=False):
         # Intensity norm
         norm = mcolors.LogNorm(vmin=0.01, vmax=100)
         
-        # Custom rain colormap: light green → dark red via yellow/orange
+        # Custom rain colormap: light green → dark red
         rain_colors = [
-            '#98FB98',  # pale green (very light)
+            '#98FB98',  # pale green
             '#32CD32',  # lime green
             '#ADFF2F',  # greenyellow
             '#FFFF00',  # yellow
-            '#FFD700',  # gold (transition)
+            '#FFD700',  # gold
             '#FFA500',  # orange
             '#FF4500',  # orangered
             '#DC143C',  # crimson
@@ -118,10 +124,10 @@ def process_grib(file_path, force_save=False):
         rain_cmap = mcolors.LinearSegmentedColormap.from_list('custom_rain', rain_colors, N=256)
 
         type_configs = [
-            (1, rain_cmap),     # Rain: custom
-            (2, 'RdPu'),        # Freezing Rain: pink → magenta
-            (3, 'Purples'),     # Ice Pellets: purple shades
-            (4, 'Blues')        # Snow: light → dark blue
+            (1, rain_cmap),     # Rain
+            (2, 'RdPu'),        # Freezing Rain
+            (3, 'Purples'),     # Ice Pellets
+            (4, 'Blues')        # Snow
         ]
         
         for type_val, cmap in type_configs:
@@ -141,7 +147,8 @@ def process_grib(file_path, force_save=False):
         out_name = f"ptype_{valid_time.strftime('%Y%m%d_%H%M')}.png"
         out_path = os.path.join(OUTPUT_DIR, out_name)
         
-        plt.savefig(out_path, transparent=True, dpi=700, bbox_inches='tight', pad_inches=0)
+        # High DPI for zoom quality on interactive map
+        plt.savefig(out_path, transparent=True, dpi=600, bbox_inches='tight', pad_inches=0)
         plt.close(fig)
 
         generated_frames.append({
@@ -158,19 +165,45 @@ def main():
         print("Waiting for latest HRRR run to complete...")
         return
 
-    print(f"Starting Cycle: {cycle_dt}")
+    print(f"Starting Cycle: {cycle_dt.strftime('%Y-%m-%d %H:00 UTC')}")
     all_frames = []
-    
-    for fhour in range(0, 19): 
-        print(f"  -> Processing Hour {fhour}...")
-        local_file = download_file(cycle_dt, fhour)
-        if local_file:
-            all_frames.extend(process_grib(local_file, force_save=(fhour==0)))
-            os.remove(local_file)
-            
+
+    # Parallel downloads
+    download_fn = functools.partial(download_file, cycle_dt)
+    fhours = list(range(0, 19))
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        future_to_fhour = {
+            executor.submit(download_fn, fhour): fhour 
+            for fhour in fhours
+        }
+
+        for future in as_completed(future_to_fhour):
+            fhour = future_to_fhour[future]
+            try:
+                local_file = future.result()
+                if local_file:
+                    print(f"  -> Processing Hour {fhour:02d} (downloaded)")
+                    force = (fhour == 0)
+                    frames = process_grib(local_file, force_save=force)
+                    all_frames.extend(frames)
+                    os.remove(local_file)
+                    print(f"  -> Hour {fhour:02d} processed ({len(frames)} frames)")
+                else:
+                    print(f"  -> Hour {fhour:02d} download failed/skipped")
+            except Exception as e:
+                print(f"  -> Error in hour {fhour:02d}: {e}")
+
+    # Sort frames chronologically
+    all_frames.sort(key=lambda x: datetime.strptime(x["time"], "%Y-%m-%d %H:%M UTC") 
+                     if x["file"] else datetime.max)
+
     with open('site/metadata.json', 'w') as f:
-        json.dump({"frames": all_frames, "cycle": cycle_dt.strftime("%Y-%m-%d %H:00 UTC")}, f)
-    
+        json.dump({
+            "frames": all_frames,
+            "cycle": cycle_dt.strftime("%Y-%m-%d %H:00 UTC")
+        }, f)
+
     print(f"Finished. Total frames: {len(all_frames)}")
 
 if __name__ == "__main__":
