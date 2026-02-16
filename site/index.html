@@ -1,115 +1,106 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>HRRR Precip Viewer</title>
+    <title>HRRR Sub-Hourly Precip</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
     <style>
-        body { margin: 0; padding: 0; background: #222; color: white; font-family: sans-serif; }
-        #map { position: absolute; top: 0; bottom: 50px; width: 100%; }
-        #controls { position: absolute; bottom: 0; height: 50px; width: 100%; background: #333; display: flex; align-items: center; padding: 0 20px; box-sizing: border-box; }
-        #slider { flex-grow: 1; margin: 0 15px; }
-        #timestamp { min-width: 180px; text-align: right; }
-        .legend { background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px; color: white; }
-        .legend i { width: 10px; height: 10px; display: inline-block; margin-right: 5px; }
+        body { margin: 0; padding: 0; background: #1a1a1a; color: white; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        #map { position: absolute; top: 0; bottom: 60px; width: 100%; }
+        #controls { position: absolute; bottom: 0; height: 60px; width: 100%; background: #222; display: flex; align-items: center; padding: 0 20px; box-sizing: border-box; gap: 15px; border-top: 1px solid #444; }
+        #slider { flex-grow: 1; cursor: pointer; }
+        #timestamp { min-width: 220px; font-weight: bold; font-family: monospace; color: #00ff00; }
+        #playBtn { padding: 8px 16px; background: #444; border: none; color: white; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        #playBtn:hover { background: #555; }
+        .legend { background: rgba(0,0,0,0.85); padding: 12px; border-radius: 8px; color: white; font-size: 12px; line-height: 1.5; border: 1px solid #444; }
+        .legend h4 { margin: 0 0 8px 0; text-transform: uppercase; font-size: 10px; color: #888; }
+        .legend i { width: 12px; height: 12px; display: inline-block; vertical-align: middle; margin-right: 8px; border-radius: 2px; }
+        .leaflet-image-layer { image-rendering: crisp-edges; image-rendering: -webkit-optimize-contrast; }
     </style>
 </head>
 <body>
 
 <div id="map"></div>
 <div id="controls">
-    <button id="playBtn">Play</button>
+    <button id="playBtn">PLAY</button>
     <input type="range" min="0" max="0" value="0" id="slider">
-    <div id="timestamp">Loading...</div>
+    <div id="timestamp">INITIALIZING...</div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
 <script>
-    // Initialize Map
-    var map = L.map('map').setView([39.8, -98.6], 4);
+    const map = L.map('map', { zoomSnap: 0.1 }).setView([38.5, -96.5], 4.5);
     
-    // Dark base map
     L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-        subdomains: 'abcd',
-        maxZoom: 19
+        attribution: '&copy; CARTO'
     }).addTo(map);
 
-    // Legend
-    var legend = L.control({position: 'bottomright'});
-    legend.onAdd = function (map) {
-        var div = L.DomUtil.create('div', 'legend');
-        div.innerHTML += '<h4>Precip Type</h4>';
-        div.innerHTML += '<div><i style="background: #00ff00"></i> Rain</div>';
-        div.innerHTML += '<div><i style="background: #00ffff"></i> Snow</div>';
-        div.innerHTML += '<div><i style="background: #ffa500"></i> Ice Pellets</div>';
-        div.innerHTML += '<div><i style="background: #ff00ff"></i> Freezing Rain</div>';
+    const legend = L.control({position: 'bottomright'});
+    legend.onAdd = function () {
+        const div = L.DomUtil.create('div', 'legend');
+        div.innerHTML = `<h4>Precipitation Type</h4>
+            <div><i style="background: #32cd32"></i> Rain</div>
+            <div><i style="background: #00ffff"></i> Snow</div>
+            <div><i style="background: #ffa500"></i> Ice Pellets</div>
+            <div><i style="background: #ff69b4"></i> Frz. Rain</div>`;
         return div;
     };
     legend.addTo(map);
 
-    var frames = [];
-    var currentOverlay = null;
-    var isPlaying = false;
-    var intervalId = null;
+    let frames = [];
+    let currentOverlay = null;
+    let isPlaying = false;
+    let playInterval = null;
 
-    // Load Metadata
+    function updateLayer(index) {
+        const frame = frames[index];
+        if (!frame) return;
+
+        if (currentOverlay) map.removeLayer(currentOverlay);
+
+        if (frame.file) {
+            currentOverlay = L.imageOverlay(frame.file, frame.bounds, {
+                opacity: 0.75,
+                interactive: false,
+                className: 'leaflet-image-layer'
+            }).addTo(map);
+        }
+
+        document.getElementById('timestamp').innerText = frame.time + (frame.file ? "" : " (CLEAR)");
+        document.getElementById('slider').value = index;
+    }
+
     fetch('metadata.json')
-        .then(response => response.json())
+        .then(r => r.json())
         .then(data => {
             frames = data.frames;
             document.getElementById('slider').max = frames.length - 1;
             updateLayer(0);
-        })
-        .catch(err => console.error("Could not load metadata", err));
+        });
 
-   function updateLayer(index) {
-    var frame = frames[index];
-    
-    // Always remove the previous overlay
-    if (currentOverlay) {
-        map.removeLayer(currentOverlay);
-        currentOverlay = null;
-    }
-
-    // Only add a new one if a file exists (not clear skies)
-    if (frame.file) {
-        currentOverlay = L.imageOverlay(frame.file, frame.bounds, {opacity: 0.8}).addTo(map);
-    }
-    
-    document.getElementById('timestamp').innerText = frame.time + (frame.file ? "" : " (Clear)");
-    document.getElementById('slider').value = index;
-}
-
-        // Add new image overlay
-        // Bounds format from python is [[lat, lon], [lat, lon]], which matches Leaflet
-        currentOverlay = L.imageOverlay(frame.file, frame.bounds, {opacity: 0.8}).addTo(map);
-        
-        document.getElementById('timestamp').innerText = frame.time;
-        document.getElementById('slider').value = index;
-    }
-
-    // Slider Interaction
-    document.getElementById('slider').addEventListener('input', function(e) {
+    document.getElementById('slider').addEventListener('input', (e) => {
+        if (isPlaying) stopPlayback();
         updateLayer(parseInt(e.target.value));
     });
 
-    // Play/Pause Logic
+    function stopPlayback() {
+        clearInterval(playInterval);
+        isPlaying = false;
+        document.getElementById('playBtn').innerText = "PLAY";
+    }
+
     document.getElementById('playBtn').addEventListener('click', function() {
         if (isPlaying) {
-            clearInterval(intervalId);
-            this.innerText = "Play";
+            stopPlayback();
         } else {
-            intervalId = setInterval(() => {
-                var slider = document.getElementById('slider');
-                var val = parseInt(slider.value);
-                val = (val + 1) % frames.length;
-                updateLayer(val);
-            }, 500); // 500ms per frame
-            this.innerText = "Pause";
+            isPlaying = true;
+            this.innerText = "PAUSE";
+            playInterval = setInterval(() => {
+                let next = (parseInt(document.getElementById('slider').value) + 1) % frames.length;
+                updateLayer(next);
+            }, 300);
         }
-        isPlaying = !isPlaying;
     });
 </script>
 </body>
