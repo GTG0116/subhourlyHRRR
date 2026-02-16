@@ -2,9 +2,9 @@ name: Update HRRR Viewer
 
 on:
   schedule:
-    # Run every hour at minute 15 (to allow HRRR upload time)
+    # Run every hour at minute 15
     - cron: '15 * * * *'
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.11'  # UPDATED: Use 3.11 to fix Boto3 warnings
 
       - name: Install System Dependencies
         run: |
