@@ -63,7 +63,7 @@ def process_grib(file_path, force_save=False):
 
     messages_by_time = {}
     # Variable names are lowercase in the sub-hourly GRIB2 files
-    target_vars = ['crain', 'csnow', 'cicep', 'cfrzr']
+    target_vars = ['crain', 'csnow', 'cicep', 'cfrzr', 'prate']
 
     for g in grbs:
         if g.shortName in target_vars:
@@ -83,16 +83,20 @@ def process_grib(file_path, force_save=False):
         cicep = msgs['cicep'].values if 'cicep' in msgs else np.zeros(lats.shape)
         csnow = msgs['csnow'].values if 'csnow' in msgs else np.zeros(lats.shape)
         
+        prate = msgs['prate'].values if 'prate' in msgs else np.zeros(lats.shape)
+        rate_mmhr = prate * 3600  # Convert kg/m²/s to mm/hr
+        
         ptype = np.zeros_like(crain)
         ptype = np.where(crain > 0, 1, ptype)
         ptype = np.where(cfrzr > 0, 2, ptype)
         ptype = np.where(cicep > 0, 3, ptype)
         ptype = np.where(csnow > 0, 4, ptype)
         
-        max_val = np.max(ptype)
+        # Check for any precipitation
+        max_rate = np.max(rate_mmhr)
         
         # Skip image generation for clear weather unless it's the first frame
-        if max_val == 0 and not force_save:
+        if max_rate <= 0 and not force_save:
             generated_frames.append({
                 "file": None,
                 "time": valid_time.strftime("%Y-%m-%d %H:%M UTC"),
@@ -105,20 +109,30 @@ def process_grib(file_path, force_save=False):
         ax = fig.add_axes([0, 0, 1, 1], projection=ccrs.Mercator(), frameon=False)
         ax.set_extent(EXTENT, crs=ccrs.PlateCarree())
         
-        cmap = mcolors.ListedColormap(['#32cd32', '#ff69b4', '#ffa500', '#00ffff'])
-        norm = mcolors.BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5], cmap.N)
+        # Define colormaps and norm for intensity
+        norm = mcolors.LogNorm(vmin=0.01, vmax=200)
+        type_configs = [
+            (1, 'Greens'),   # Rain
+            (2, 'RdPu'),     # FrzRain
+            (3, 'Oranges'),  # Ice
+            (4, 'Blues')     # Snow
+        ]
         
-        ax.pcolormesh(lons, lats, np.ma.masked_where(ptype == 0, ptype), 
-                      transform=ccrs.PlateCarree(), cmap=cmap, norm=norm, 
-                      shading='auto', antialiased=True)
+        for type_val, cmap_name in type_configs:
+            mask = (ptype == type_val) & (rate_mmhr > 0)
+            if np.any(mask):
+                masked_rate = np.ma.masked_where(~mask, rate_mmhr)
+                ax.pcolormesh(lons, lats, masked_rate, 
+                              transform=ccrs.PlateCarree(), cmap=cmap_name, norm=norm, 
+                              shading='auto', antialiased=True)
 
         ax.axis('off')
         
         out_name = f"ptype_{valid_time.strftime('%Y%m%d_%H%M')}.png"
         out_path = os.path.join(OUTPUT_DIR, out_name)
         
-        # Save without cropping (fixes jumping alignment)
-        plt.savefig(out_path, transparent=True, dpi=120)
+        # Save without cropping (fixes jumping alignment), higher DPI for quality
+        plt.savefig(out_path, transparent=True, dpi=200)
         plt.close()
 
         generated_frames.append({
