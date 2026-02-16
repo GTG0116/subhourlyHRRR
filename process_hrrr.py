@@ -100,27 +100,40 @@ def process_grib(file_path, force_save=False):
         ax = fig.add_axes([0, 0, 1, 1], projection=ccrs.Mercator(), frameon=False)
         ax.set_extent(EXTENT, crs=ccrs.PlateCarree())
         
-        # Intensity norm (good for precip rate)
-        norm = mcolors.LogNorm(vmin=0.01, vmax=150)  # cap at 150 mm/hr ~ extreme
+        # Intensity norm
+        norm = mcolors.LogNorm(vmin=0.01, vmax=100)
         
-        # More commercial-like colormaps (similar to AccuWeather/Weather Channel p-type + radar)
+        # Custom rain colormap: light green → dark red via yellow/orange
+        rain_colors = [
+            '#98FB98',  # pale green (very light)
+            '#32CD32',  # lime green
+            '#ADFF2F',  # greenyellow
+            '#FFFF00',  # yellow
+            '#FFD700',  # gold (transition)
+            '#FFA500',  # orange
+            '#FF4500',  # orangered
+            '#DC143C',  # crimson
+            '#8B0000'   # darkred
+        ]
+        rain_cmap = mcolors.LinearSegmentedColormap.from_list('custom_rain', rain_colors, N=256)
+
         type_configs = [
-            (1, 'YlGn'),      # Rain: yellow-green → dark green (common rain ramp)
-            (2, 'RdPu'),      # Freezing Rain: pink → magenta/purple
-            (3, 'Purples'),   # Ice Pellets: purple shades
-            (4, 'Blues')      # Snow: light → dark blue/cyan
+            (1, rain_cmap),     # Rain: custom
+            (2, 'RdPu'),        # Freezing Rain: pink → magenta
+            (3, 'Purples'),     # Ice Pellets: purple shades
+            (4, 'Blues')        # Snow: light → dark blue
         ]
         
-        for type_val, cmap_name in type_configs:
-            mask = (ptype == type_val) & (rate_mmhr > 0.005)  # small threshold to avoid noise
+        for type_val, cmap in type_configs:
+            mask = (ptype == type_val) & (rate_mmhr > 0.005)
             if np.any(mask):
                 masked_rate = np.ma.masked_where(~mask, rate_mmhr)
                 ax.pcolormesh(lons, lats, masked_rate, 
                               transform=ccrs.PlateCarree(),
-                              cmap=cmap_name,
+                              cmap=cmap,
                               norm=norm,
-                              shading='nearest',          # KEY FIX for blocky/pixelated pattern
-                              antialiased=False,          # often smoother with nearest
+                              shading='nearest',
+                              antialiased=False,
                               zorder=5)
 
         ax.axis('off')
@@ -128,7 +141,7 @@ def process_grib(file_path, force_save=False):
         out_name = f"ptype_{valid_time.strftime('%Y%m%d_%H%M')}.png"
         out_path = os.path.join(OUTPUT_DIR, out_name)
         
-        plt.savefig(out_path, transparent=True, dpi=500, bbox_inches='tight', pad_inches=0)
+        plt.savefig(out_path, transparent=True, dpi=300, bbox_inches='tight', pad_inches=0)
         plt.close(fig)
 
         generated_frames.append({
