@@ -1,0 +1,42 @@
+name: Update HRRR Viewer
+
+on:
+  schedule:
+    # Run every hour at minute 15 (to allow HRRR upload time)
+    - cron: '15 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes0 libgeos-dev
+
+      - name: Install Python Libraries
+        run: |
+          pip install boto3 numpy matplotlib cartopy pygrib
+
+      - name: Run Processing Script
+        run: python process_hrrr.py
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          force_orphan: true
