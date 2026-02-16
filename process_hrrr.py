@@ -16,23 +16,27 @@ BUCKET_NAME = 'noaa-hrrr-bdp-pds'
 OUTPUT_DIR = 'site/data'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Suppress Boto3 and Matplotlib warnings
 warnings.filterwarnings("ignore")
+
+# Initialize S3 client once
 s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
 
+# Fixed geographic bounds for CONUS
+# [West, East, South, North]
+EXTENT = [-125, -66.5, 24, 49.5]
+
 def get_latest_cycle():
-    """Finds a cycle that is likely complete (at least 2 hours old)."""
+    """Finds the most recent completed HRRR run (checks for F18)."""
     now = datetime.now(timezone.utc)
-    
-    # We look back starting from 2 hours ago to ensure the run is finished uploading
     for i in range(2, 6): 
         cycle_time = now - timedelta(hours=i)
         cycle_hour = cycle_time.hour
         date_str = cycle_time.strftime('%Y%m%d')
         
-        # Check for hour 18 specifically to ensure the whole run is there
+        # Check for the 18th forecast hour to ensure the cycle is finished uploading
         prefix = f"hrrr.{date_str}/conus/hrrr.t{cycle_hour:02d}z.wrfsubhf18.grib2"
         try:
-            print(f"Checking if cycle {date_str} T{cycle_hour}Z is complete...")
             s3.head_object(Bucket=BUCKET_NAME, Key=prefix)
             return cycle_time.replace(minute=0, second=0, microsecond=0)
         except:
@@ -45,12 +49,10 @@ def download_file(cycle_dt, fhour):
     filename = f"hrrr.t{cycle_hour:02d}z.wrfsubhf{fhour:02d}.grib2"
     key = f"hrrr.{date_str}/conus/{filename}"
     local_path = f"temp_{filename}"
-    
     try:
         s3.download_file(BUCKET_NAME, key, local_path)
         return local_path
-    except Exception as e:
-        print(f"  X Skillpped {filename}: {e}")
+    except:
         return None
 
 def process_grib(file_path, force_save=False):
@@ -60,6 +62,7 @@ def process_grib(file_path, force_save=False):
         return []
 
     messages_by_time = {}
+    # Variable names are lowercase in the sub-hourly GRIB2 files
     target_vars = ['crain', 'csnow', 'cicep', 'cfrzr']
 
     for g in grbs:
@@ -74,99 +77,79 @@ def process_grib(file_path, force_save=False):
         ref_msg = list(msgs.values())[0]
         lats, lons = ref_msg.latlons()
         
+        # 1=Rain, 2=FrzRain, 3=Ice, 4=Snow
         crain = msgs['crain'].values if 'crain' in msgs else np.zeros(lats.shape)
         cfrzr = msgs['cfrzr'].values if 'cfrzr' in msgs else np.zeros(lats.shape)
         cicep = msgs['cicep'].values if 'cicep' in msgs else np.zeros(lats.shape)
         csnow = msgs['csnow'].values if 'csnow' in msgs else np.zeros(lats.shape)
         
         ptype = np.zeros_like(crain)
-        ptype = np.where(crain > 0, 1, ptype) # Any value > 0
+        ptype = np.where(crain > 0, 1, ptype)
         ptype = np.where(cfrzr > 0, 2, ptype)
         ptype = np.where(cicep > 0, 3, ptype)
         ptype = np.where(csnow > 0, 4, ptype)
         
         max_val = np.max(ptype)
         
-        # Only save if there is precip OR if we are forcing a test frame
+        # Skip image generation for clear weather unless it's the first frame
         if max_val == 0 and not force_save:
-            print(f"    - Clear skies at {valid_time}")
             generated_frames.append({
                 "file": None,
                 "time": valid_time.strftime("%Y-%m-%d %H:%M UTC"),
-                "bounds": [[24, -125], [49.5, -66.5]]
+                "bounds": [[EXTENT[2], EXTENT[0]], [EXTENT[3], EXTENT[1]]]
             })
             continue
 
-        print(f"    + Saving frame for {valid_time} (Max P-Type: {max_val})")
-        # --- Improved Plotting Logic ---
-# Force a specific aspect ratio based on our bounds (roughly 10:6 for CONUS)
-fig = plt.figure(figsize=(15, 9), frameon=False) 
+        # Plotting - High Resolution & Fixed Aspect
+        fig = plt.figure(figsize=(15, 9), frameon=False)
+        ax = fig.add_axes([0, 0, 1, 1], projection=ccrs.Mercator(), frameon=False)
+        ax.set_extent(EXTENT, crs=ccrs.PlateCarree())
+        
+        cmap = mcolors.ListedColormap(['#32cd32', '#ff69b4', '#ffa500', '#00ffff'])
+        norm = mcolors.BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5], cmap.N)
+        
+        ax.pcolormesh(lons, lats, np.ma.masked_where(ptype == 0, ptype), 
+                      transform=ccrs.PlateCarree(), cmap=cmap, norm=norm, 
+                      shading='auto', antialiased=True)
 
-# Use add_axes to fill the ENTIRE figure area (no margins/padding)
-ax = fig.add_axes([0, 0, 1, 1], projection=ccrs.Mercator(), frameon=False)
-ax.set_extent([-125, -66.5, 24, 49.5], crs=ccrs.PlateCarree())
-
-# Colormap
-cmap = mcolors.ListedColormap(['#32cd32', '#ff69b4', '#ffa500', '#00ffff']) # High-vis colors
-norm = mcolors.BoundaryNorm([0.5, 1.5, 2.5, 3.5, 4.5], cmap.N)
-
-# Plot data
-# We use 'nearest' to keep pixels sharp, or 'bilinear' to make it look smooth
-ax.pcolormesh(lons, lats, np.ma.masked_where(ptype == 0, ptype), 
-              transform=ccrs.PlateCarree(), cmap=cmap, norm=norm, 
-              shading='auto', antialiased=True)
-
-ax.axis('off')
-
-# CRITICAL: Do NOT use bbox_inches='tight'. 
-# This ensures the geographic bounds of the PNG are identical every time.
-out_path = os.path.join(OUTPUT_DIR, out_filename)
-plt.savefig(out_path, transparent=True, dpi=150) # Higher DPI for crispness
-plt.close()
+        ax.axis('off')
+        
+        out_name = f"ptype_{valid_time.strftime('%Y%m%d_%H%M')}.png"
+        out_path = os.path.join(OUTPUT_DIR, out_name)
+        
+        # Save without cropping (fixes jumping alignment)
+        plt.savefig(out_path, transparent=True, dpi=120)
+        plt.close()
 
         generated_frames.append({
-            "file": f"data/{out_filename}",
+            "file": f"data/{out_name}",
             "time": valid_time.strftime("%Y-%m-%d %H:%M UTC"),
-            "bounds": [[24, -125], [49.5, -66.5]]
+            "bounds": [[EXTENT[2], EXTENT[0]], [EXTENT[3], EXTENT[1]]]
         })
         
     return generated_frames
 
-# Update main loop to pass force_save=True for the first file
-def main():
-    cycle_dt = get_latest_cycle()
-    if not cycle_dt: return
-
-    all_frames = []
-    for fhour in range(0, 19): 
-        local_file = download_file(cycle_dt, fhour)
-        if local_file:
-            # Force save the very first timestep of the first file
-            is_first = (fhour == 0)
-            all_frames.extend(process_grib(local_file, force_save=is_first))
-            os.remove(local_file)
-    # ... (rest of the script)
-
 def main():
     cycle_dt = get_latest_cycle()
     if not cycle_dt:
-        print("No complete cycle found yet.")
+        print("Waiting for latest HRRR run to complete...")
         return
 
-    print(f"Processing Verified Cycle: {cycle_dt}")
+    print(f"Starting Cycle: {cycle_dt}")
     all_frames = []
     
     for fhour in range(0, 19): 
-        print(f"Working on F{fhour:02d}...")
+        print(f"  -> Processing Hour {fhour}...")
         local_file = download_file(cycle_dt, fhour)
         if local_file:
-            all_frames.extend(process_grib(local_file))
+            # Force first frame save to verify output even if clear
+            all_frames.extend(process_grib(local_file, force_save=(fhour==0)))
             os.remove(local_file)
             
     with open('site/metadata.json', 'w') as f:
         json.dump({"frames": all_frames, "cycle": cycle_dt.strftime("%Y-%m-%d %H:00 UTC")}, f)
     
-    print(f"Successfully processed {len(all_frames)} timesteps.")
+    print(f"Finished. Total frames: {len(all_frames)}")
 
 if __name__ == "__main__":
     main()
