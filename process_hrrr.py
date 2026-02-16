@@ -16,25 +16,21 @@ BUCKET_NAME = 'noaa-hrrr-bdp-pds'
 OUTPUT_DIR = 'site/data'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Suppress Boto3 and Matplotlib warnings
+# Suppress warnings
 warnings.filterwarnings("ignore")
 
-# Initialize S3 client once
+# S3 client
 s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
 
-# Fixed geographic bounds for CONUS
-# [West, East, South, North]
+# CONUS bounds [West, East, South, North]
 EXTENT = [-125, -66.5, 24, 49.5]
 
 def get_latest_cycle():
-    """Finds the most recent completed HRRR run (checks for F18)."""
     now = datetime.now(timezone.utc)
     for i in range(2, 6): 
         cycle_time = now - timedelta(hours=i)
         cycle_hour = cycle_time.hour
         date_str = cycle_time.strftime('%Y%m%d')
-        
-        # Check for the 18th forecast hour to ensure the cycle is finished uploading
         prefix = f"hrrr.{date_str}/conus/hrrr.t{cycle_hour:02d}z.wrfsubhf18.grib2"
         try:
             s3.head_object(Bucket=BUCKET_NAME, Key=prefix)
@@ -62,7 +58,6 @@ def process_grib(file_path, force_save=False):
         return []
 
     messages_by_time = {}
-    # Variable names are lowercase in the sub-hourly GRIB2 files
     target_vars = ['crain', 'csnow', 'cicep', 'cfrzr', 'prate']
 
     for g in grbs:
@@ -77,25 +72,22 @@ def process_grib(file_path, force_save=False):
         ref_msg = list(msgs.values())[0]
         lats, lons = ref_msg.latlons()
         
-        # 1=Rain, 2=FrzRain, 3=Ice, 4=Snow
         crain = msgs['crain'].values if 'crain' in msgs else np.zeros(lats.shape)
         cfrzr = msgs['cfrzr'].values if 'cfrzr' in msgs else np.zeros(lats.shape)
         cicep = msgs['cicep'].values if 'cicep' in msgs else np.zeros(lats.shape)
         csnow = msgs['csnow'].values if 'csnow' in msgs else np.zeros(lats.shape)
         
         prate = msgs['prate'].values if 'prate' in msgs else np.zeros(lats.shape)
-        rate_mmhr = prate * 3600  # Convert kg/m²/s to mm/hr
+        rate_mmhr = prate * 3600  # kg/m²/s → mm/hr
         
-        ptype = np.zeros_like(crain)
-        ptype = np.where(crain > 0, 1, ptype)
-        ptype = np.where(cfrzr > 0, 2, ptype)
-        ptype = np.where(cicep > 0, 3, ptype)
-        ptype = np.where(csnow > 0, 4, ptype)
+        ptype = np.zeros_like(crain, dtype=int)
+        ptype = np.where(crain > 0, 1, ptype)   # Rain
+        ptype = np.where(cfrzr > 0, 2, ptype)   # Freezing Rain
+        ptype = np.where(cicep > 0, 3, ptype)   # Ice Pellets
+        ptype = np.where(csnow > 0, 4, ptype)   # Snow
         
-        # Check for any precipitation
         max_rate = np.max(rate_mmhr)
         
-        # Skip image generation for clear weather unless it's the first frame
         if max_rate <= 0 and not force_save:
             generated_frames.append({
                 "file": None,
@@ -104,36 +96,40 @@ def process_grib(file_path, force_save=False):
             })
             continue
 
-        # Plotting - High Resolution & Fixed Aspect
         fig = plt.figure(figsize=(15, 9), frameon=False)
         ax = fig.add_axes([0, 0, 1, 1], projection=ccrs.Mercator(), frameon=False)
         ax.set_extent(EXTENT, crs=ccrs.PlateCarree())
         
-        # Define colormaps and norm for intensity
-        norm = mcolors.LogNorm(vmin=0.01, vmax=200)
+        # Intensity norm (good for precip rate)
+        norm = mcolors.LogNorm(vmin=0.01, vmax=150)  # cap at 150 mm/hr ~ extreme
+        
+        # More commercial-like colormaps (similar to AccuWeather/Weather Channel p-type + radar)
         type_configs = [
-            (1, 'Greens'),   # Rain
-            (2, 'RdPu'),     # FrzRain
-            (3, 'Oranges'),  # Ice
-            (4, 'Blues')     # Snow
+            (1, 'YlGn'),      # Rain: yellow-green → dark green (common rain ramp)
+            (2, 'RdPu'),      # Freezing Rain: pink → magenta/purple
+            (3, 'Purples'),   # Ice Pellets: purple shades
+            (4, 'Blues')      # Snow: light → dark blue/cyan
         ]
         
         for type_val, cmap_name in type_configs:
-            mask = (ptype == type_val) & (rate_mmhr > 0)
+            mask = (ptype == type_val) & (rate_mmhr > 0.005)  # small threshold to avoid noise
             if np.any(mask):
                 masked_rate = np.ma.masked_where(~mask, rate_mmhr)
                 ax.pcolormesh(lons, lats, masked_rate, 
-                              transform=ccrs.PlateCarree(), cmap=cmap_name, norm=norm, 
-                              shading='auto', antialiased=True)
+                              transform=ccrs.PlateCarree(),
+                              cmap=cmap_name,
+                              norm=norm,
+                              shading='nearest',          # KEY FIX for blocky/pixelated pattern
+                              antialiased=False,          # often smoother with nearest
+                              zorder=5)
 
         ax.axis('off')
         
         out_name = f"ptype_{valid_time.strftime('%Y%m%d_%H%M')}.png"
         out_path = os.path.join(OUTPUT_DIR, out_name)
         
-        # Save without cropping (fixes jumping alignment), higher DPI for quality
-        plt.savefig(out_path, transparent=True, dpi=200)
-        plt.close()
+        plt.savefig(out_path, transparent=True, dpi=500, bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
 
         generated_frames.append({
             "file": f"data/{out_name}",
@@ -156,7 +152,6 @@ def main():
         print(f"  -> Processing Hour {fhour}...")
         local_file = download_file(cycle_dt, fhour)
         if local_file:
-            # Force first frame save to verify output even if clear
             all_frames.extend(process_grib(local_file, force_save=(fhour==0)))
             os.remove(local_file)
             
