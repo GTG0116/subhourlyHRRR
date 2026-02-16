@@ -59,76 +59,68 @@ def download_file(cycle_dt, fhour):
         return None
 
 def process_grib(file_path):
-    """Extracts precip type and generates a transparent PNG."""
     try:
         grbs = pygrib.open(file_path)
     except Exception as e:
         print(f"Could not open GRIB file: {e}")
         return []
 
-    # Group messages by validDate
     messages_by_time = {}
     
-    # Use shortNames: CRAIN (Rain), CSNOW (Snow), CICEP (Ice), CFRZR (Freezing Rain)
-    relevant_vars = ['CRAIN', 'CSNOW', 'CICEP', 'CFRZR']
+    # Let's see what's actually inside the file if we find nothing
+    all_names = set()
 
-    try:
-        for g in grbs:
-            if g.shortName in relevant_vars:
-                if g.validDate not in messages_by_time:
-                    messages_by_time[g.validDate] = {}
-                messages_by_time[g.validDate][g.shortName] = g
-    except Exception as e:
-        print(f"Error reading GRIB messages: {e}")
+    for g in grbs:
+        all_names.add(g.shortName)
+        # HRRR sometimes uses 'crain' (lowercase) or specific parameter numbers
+        # We check for the standard shortNames used in the sub-hourly files
+        if g.shortName in ['CRAIN', 'CSNOW', 'CICEP', 'CFRZR']:
+            v_time = g.validDate
+            if v_time not in messages_by_time:
+                messages_by_time[v_time] = {}
+            messages_by_time[v_time][g.shortName] = g
+
+    if not messages_by_time:
+        print(f"  !!! No precip variables found in {file_path}")
+        print(f"  Available shortNames: {list(all_names)[:20]}...") # Print first 20 to debug
+        return []
 
     generated_frames = []
 
     for valid_time, msgs in sorted(messages_by_time.items()):
-        # Ensure we have all 4 types to make a valid map
-        if len(msgs) < 4:
-            continue 
+        # Try to proceed even if one type is missing by creating a zero-array
+        ref_msg = list(msgs.values())[0]
+        lats, lons = ref_msg.latlons()
+        shape = ref_msg.values.shape
 
-        print(f"  > Generating frame for {valid_time}...")
-
-        # Extract data grids
-        crain = msgs['CRAIN'].values
-        cfrzr = msgs['CFRZR'].values
-        cicep = msgs['CICEP'].values
-        csnow = msgs['CSNOW'].values
+        crain = msgs['CRAIN'].values if 'CRAIN' in msgs else np.zeros(shape)
+        cfrzr = msgs['CFRZR'].values if 'CFRZR' in msgs else np.zeros(shape)
+        cicep = msgs['CICEP'].values if 'CICEP' in msgs else np.zeros(shape)
+        csnow = msgs['CSNOW'].values if 'CSNOW' in msgs else np.zeros(shape)
         
-        lats, lons = msgs['CRAIN'].latlons()
-
-        # Create Precip Type mask: 0=None, 1=Rain, 2=FrzRain, 3=Ice, 4=Snow
         ptype = np.zeros_like(crain)
-        ptype = np.where(crain == 1, 1, ptype)
-        ptype = np.where(cfrzr == 1, 2, ptype)
-        ptype = np.where(cicep == 1, 3, ptype)
-        ptype = np.where(csnow == 1, 4, ptype)
+        ptype = np.where(crain > 0.5, 1, ptype)
+        ptype = np.where(cfrzr > 0.5, 2, ptype)
+        ptype = np.where(cicep > 0.5, 3, ptype)
+        ptype = np.where(csnow > 0.5, 4, ptype)
         
-        # Mask out 0 (no precip)
-        ptype_masked = np.ma.masked_where(ptype == 0, ptype)
-
-        # Skip generating image if map is empty (saves time)
-        if np.count_nonzero(ptype) == 0:
-            print("    (Skipping empty frame)")
-            # Still add metadata so the timeline is smooth, but point to a blank/null image?
-            # For now, let's just skip it to keep it simple.
-            continue
+        if np.max(ptype) == 0:
+            print(f"    - No precip detected at {valid_time} (Dry Map)")
+            # We will still generate the frame so the map isn't broken
+            # but it will just be a fully transparent PNG.
 
         # Plotting
         fig = plt.figure(figsize=(10, 10), frameon=False)
         ax = plt.axes(projection=ccrs.Mercator())
-        
-        # CONUS Extent
         extent = [-125, -66.5, 24, 49.5]
         ax.set_extent(extent, crs=ccrs.PlateCarree())
         
-        # Colors: [Rain=Green, FrzRain=Pink, Ice=Orange, Snow=Blue]
         cmap = mcolors.ListedColormap(['#00ff00', '#ff00ff', '#ffa500', '#00ffff'])
         bounds = [0.5, 1.5, 2.5, 3.5, 4.5]
         norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
-        # Plot
+        ptype_masked = np.ma.masked_where(ptype == 0, ptype)
+        
         ax.pcolormesh(lons, lats, ptype_masked, transform=ccrs.PlateCarree(), 
                       cmap=cmap, norm=norm, shading='nearest', alpha=0.8)
 
@@ -138,7 +130,8 @@ def process_grib(file_path):
         out_filename = f"ptype_{timestamp_str}.png"
         out_path = os.path.join(OUTPUT_DIR, out_filename)
         
-        plt.savefig(out_path, bbox_inches='tight', pad_inches=0, transparent=True, dpi=100)
+        # Lower DPI to speed up GitHub Actions
+        plt.savefig(out_path, bbox_inches='tight', pad_inches=0, transparent=True, dpi=80)
         plt.close()
 
         generated_frames.append({
