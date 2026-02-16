@@ -64,12 +64,23 @@
         })
         .catch(err => console.error("Could not load metadata", err));
 
-    function updateLayer(index) {
-        var frame = frames[index];
-        
-        if (currentOverlay) {
-            map.removeLayer(currentOverlay);
-        }
+   function updateLayer(index) {
+    var frame = frames[index];
+    
+    // Always remove the previous overlay
+    if (currentOverlay) {
+        map.removeLayer(currentOverlay);
+        currentOverlay = null;
+    }
+
+    // Only add a new one if a file exists (not clear skies)
+    if (frame.file) {
+        currentOverlay = L.imageOverlay(frame.file, frame.bounds, {opacity: 0.8}).addTo(map);
+    }
+    
+    document.getElementById('timestamp').innerText = frame.time + (frame.file ? "" : " (Clear)");
+    document.getElementById('slider').value = index;
+}
 
         // Add new image overlay
         // Bounds format from python is [[lat, lon], [lat, lon]], which matches Leaflet
