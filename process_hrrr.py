@@ -53,14 +53,13 @@ def download_file(cycle_dt, fhour):
         print(f"  X Skillpped {filename}: {e}")
         return None
 
-def process_grib(file_path):
+def process_grib(file_path, force_save=False):
     try:
         grbs = pygrib.open(file_path)
     except:
         return []
 
     messages_by_time = {}
-    # UPDATED: Using lowercase names as identified in your logs
     target_vars = ['crain', 'csnow', 'cicep', 'cfrzr']
 
     for g in grbs:
@@ -72,26 +71,25 @@ def process_grib(file_path):
 
     generated_frames = []
     for valid_time, msgs in sorted(messages_by_time.items()):
-        # Get shape from any available message
         ref_msg = list(msgs.values())[0]
         lats, lons = ref_msg.latlons()
         
-        # Build ptype array (1=Rain, 2=FrzRain, 3=Ice, 4=Snow)
-        # Note: We use lowercase keys here too
         crain = msgs['crain'].values if 'crain' in msgs else np.zeros(lats.shape)
         cfrzr = msgs['cfrzr'].values if 'cfrzr' in msgs else np.zeros(lats.shape)
         cicep = msgs['cicep'].values if 'cicep' in msgs else np.zeros(lats.shape)
         csnow = msgs['csnow'].values if 'csnow' in msgs else np.zeros(lats.shape)
         
         ptype = np.zeros_like(crain)
-        ptype = np.where(crain > 0.5, 1, ptype)
-        ptype = np.where(cfrzr > 0.5, 2, ptype)
-        ptype = np.where(cicep > 0.5, 3, ptype)
-        ptype = np.where(csnow > 0.5, 4, ptype)
+        ptype = np.where(crain > 0, 1, ptype) # Any value > 0
+        ptype = np.where(cfrzr > 0, 2, ptype)
+        ptype = np.where(cicep > 0, 3, ptype)
+        ptype = np.where(csnow > 0, 4, ptype)
         
-        # Optimization: If the whole map is dry, we can skip creating the image 
-        # but we'll still add a "null" entry so the timeline doesn't jump.
-        if np.max(ptype) == 0:
+        max_val = np.max(ptype)
+        
+        # Only save if there is precip OR if we are forcing a test frame
+        if max_val == 0 and not force_save:
+            print(f"    - Clear skies at {valid_time}")
             generated_frames.append({
                 "file": None,
                 "time": valid_time.strftime("%Y-%m-%d %H:%M UTC"),
@@ -99,6 +97,7 @@ def process_grib(file_path):
             })
             continue
 
+        print(f"    + Saving frame for {valid_time} (Max P-Type: {max_val})")
         fig = plt.figure(figsize=(10, 6), frameon=False)
         ax = plt.axes(projection=ccrs.Mercator())
         ax.set_extent([-125, -66.5, 24, 49.5], crs=ccrs.PlateCarree())
@@ -121,6 +120,21 @@ def process_grib(file_path):
         })
         
     return generated_frames
+
+# Update main loop to pass force_save=True for the first file
+def main():
+    cycle_dt = get_latest_cycle()
+    if not cycle_dt: return
+
+    all_frames = []
+    for fhour in range(0, 19): 
+        local_file = download_file(cycle_dt, fhour)
+        if local_file:
+            # Force save the very first timestep of the first file
+            is_first = (fhour == 0)
+            all_frames.extend(process_grib(local_file, force_save=is_first))
+            os.remove(local_file)
+    # ... (rest of the script)
 
 def main():
     cycle_dt = get_latest_cycle()
